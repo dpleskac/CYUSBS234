@@ -3,118 +3,121 @@ from usb.util import *
 from array import array
 from binascii import hexlify
 
-# find our device
-dev = find(idVendor=0x04b4, idProduct=0x0004)
+class UsbBridge:
+    ''' Usb-Serial Bridge driver '''
 
-# was it found?
-if dev is None:
-    raise ValueError('Device not found')
+    __DEVICE_TO_HOST = 0xC0
+    __HOST_TO_DEVICE = 0x40
+    __I2C_WRITE_CMD          = 0xC6
+    __I2C_READ_CMD           = 0xC7
+    __I2C_GET_STATUS_CMD     = 0xC8
+    __I2C_GET_STATUS_CMD_LEN = 3
+    __I2C_RESET_CMD          = 0xC9
+    __I2C_RESET_CMD_LEN      = 0
 
-# set the active configuration. With no arguments, the first
-# configuration will be the active one
-dev.set_configuration()
+    def __init__(self):
+        self.dev = find(idVendor=0x04b4, idProduct=0x0004)
+        if self.dev is None:
+            raise ValueError('Device not found')
+        self.dev.set_configuration()
+        cfg = self.dev.get_active_configuration()
+        if cfg is None:
+            raise ValueError('Configuration not found')
+        intf = find_descriptor(cfg, bInterfaceSubClass=3)
+        if intf is None:
+            raise ValueError('Interface not found')
+        self.ep_intr = find_descriptor(intf, \
+                custom_match = lambda e: endpoint_direction(e.bEndpointAddress) == ENDPOINT_IN, \
+                bmAttributes=ENDPOINT_TYPE_INTR)
+        self.ep_bulk_i = find_descriptor(intf, \
+                custom_match = lambda e: endpoint_direction(e.bEndpointAddress) == ENDPOINT_IN, \
+                bmAttributes=ENDPOINT_TYPE_BULK)
+        self.ep_bulk_o = find_descriptor(intf, \
+                custom_match = lambda e: endpoint_direction(e.bEndpointAddress) == ENDPOINT_OUT, \
+                bmAttributes=ENDPOINT_TYPE_BULK)
+        print self.ep_bulk_i
+        print self.ep_bulk_o
+        print self.ep_intr
 
-cfg = dev.get_active_configuration()
-if cfg is None:
-    raise ValueError('Configuration not found')
+    def i2c_reset(self):	
+        # reset read
+        sts = self.dev.ctrl_transfer(self.__DEVICE_TO_HOST, self.__I2C_RESET_CMD, 0, 0, self.__I2C_RESET_CMD_LEN)
+        # reset write
+        sts = self.dev.ctrl_transfer(self.__DEVICE_TO_HOST, self.__I2C_RESET_CMD, 1, 0, self.__I2C_RESET_CMD_LEN)
 
-intf = find_descriptor(cfg, bInterfaceSubClass=3)
-if intf is None:
-    raise ValueError('Interface not found')
+    def i2c_status_ok(self):
+        __I2C_ERROR_BIT = 0x01
+        sts = self.dev.ctrl_transfer(self.__DEVICE_TO_HOST, self.__I2C_GET_STATUS_CMD, 0, 0, self.__I2C_GET_STATUS_CMD_LEN)
+        if sts[0] & __I2C_ERROR_BIT:
+            print "Device busy"
+            return False;
 
-ep_intr = find_descriptor(intf, \
-		custom_match = lambda e: endpoint_direction(e.bEndpointAddress) == ENDPOINT_IN, 
-		bmAttributes=ENDPOINT_TYPE_INTR)
+    def i2c_wait_for_interrupt(self):
+        self.ep_intr.read(3)
 
-ep_bulk_i = find_descriptor(intf, \
-		custom_match = lambda e: endpoint_direction(e.bEndpointAddress) == ENDPOINT_IN, \
-		bmAttributes=ENDPOINT_TYPE_BULK)
+    def i2c_write(self, dev_addr, data):
+        if self.i2c_status_ok() is False:
+            exit
+        # FIXME - hardcoded start=1, stop=0
+        self.dev.ctrl_transfer(self.__HOST_TO_DEVICE, self.__I2C_WRITE_CMD, ((dev_addr << 8) | 0x01), len(data), 0)
+        self.ep_bulk_o.write(data, len(data))
+        self.i2c_wait_for_interrupt()
 
-ep_bulk_o = find_descriptor(intf, \
-		custom_match = lambda e: endpoint_direction(e.bEndpointAddress) == ENDPOINT_OUT, \
-		bmAttributes=ENDPOINT_TYPE_BULK)
-
-print ep_bulk_i
-print ep_bulk_o
-print ep_intr
-
-DEVICE_TO_HOST = 0xC0
-HOST_TO_DEVICE = 0x40
-
-I2C_WRITE_CMD          = 0xC6
-I2C_READ_CMD           = 0xC7
-I2C_GET_STATUS_CMD     = 0xC8
-I2C_GET_STATUS_CMD_LEN = 3
-I2C_RESET_CMD          = 0xC9
-I2C_RESET_CMD_LEN      = 0
+    def i2c_read(self, dev_addr, length):
+        if self.i2c_status_ok() is False:
+            exit
+        data = array('B',[])
+        # FIXME - hardcoded start=1, stop=1
+        self.dev.ctrl_transfer(self.__HOST_TO_DEVICE, self.__I2C_READ_CMD, ((dev_addr << 8) | 0x03), length, 0)
+        data = self.ep_bulk_i.read(length)
+        self.i2c_wait_for_interrupt()
+        return data
 
 
-def i2c_reset():	
-	# reset read
-	sts = dev.ctrl_transfer(DEVICE_TO_HOST, I2C_RESET_CMD, 0, 0, I2C_RESET_CMD_LEN)
-	# reset write
-	sts = dev.ctrl_transfer(DEVICE_TO_HOST, I2C_RESET_CMD, 1, 0, I2C_RESET_CMD_LEN)
+class I2cEeprom:
+    def __init__(self, usb_bridge, addr):
+        self.ub = usb_bridge
+        self.eeprom_addr = addr
 
-def i2c_status_ok():
-	I2C_ERROR_BIT = 0x01
-	sts = dev.ctrl_transfer(DEVICE_TO_HOST, I2C_GET_STATUS_CMD, 0, 0, I2C_GET_STATUS_CMD_LEN)
-	if sts[0] & I2C_ERROR_BIT:
-		print "Device busy"
-		return False;
+    def write(self, addr, data):
+        # add address (first 2 bytes)
+        data.insert(0, (addr & 0xff))
+        data.insert(0, ((addr & 0xff00) >> 8))
+        self.ub.i2c_write(self.eeprom_addr, data)
 
-def i2c_wait_for_interrupt():
-	ep_intr.read(3)
+    def read(self, addr, length):
+        # start clean
+        self.ub.i2c_reset()
+        # write address page
+        data = array('B', [((addr & 0xff00) >> 8), (addr & 0xff)])
+        self.ub.i2c_write(self.eeprom_addr, data)
+        # read data
+        return self.ub.i2c_read(self.eeprom_addr, length)
 
-def i2c_write(dev_addr, data):
-	if i2c_status_ok() is False:
-		exit
-	# FIXME - hardcoded start=1, stop=0
-	dev.ctrl_transfer(HOST_TO_DEVICE, I2C_WRITE_CMD, ((dev_addr << 8) | 0x01), len(data), 0)
-	ep_bulk_o.write(data, len(data))
-	i2c_wait_for_interrupt()
+    def dump(self, lines):
+        for line in range(0,lines):
+            addr = line*32
+            print hex(addr), hexlify(self.read(addr, 32))
+        print
 
-def i2c_read(dev_addr, length):
-	if i2c_status_ok() is False:
-		exit
-	data = array('B',[])
-	# FIXME - hardcoded start=1, stop=1
-	dev.ctrl_transfer(HOST_TO_DEVICE, I2C_READ_CMD, ((dev_addr << 8) | 0x03), length, 0)
-	data = ep_bulk_i.read(length)
-	i2c_wait_for_interrupt()
-	return data
 
+b = UsbBridge()
 
 eeprom_addr = 0x51
+e = I2cEeprom(b,eeprom_addr)
 
-def i2c_eeprom_write(addr, data):
-	# add address (first 2 bytes)
-	data.insert(0, (addr & 0xff))
-	data.insert(0, ((addr & 0xff00) >> 8))
-	i2c_write(eeprom_addr, data)
-
-def i2c_eeprom_read(addr, length):
-	# start clean
-	i2c_reset()
-	# write address page
-	data = array('B', [((addr & 0xff00) >> 8), (addr & 0xff)])
-	i2c_write(eeprom_addr, data)
-	# read data
-	return i2c_read(eeprom_addr, length)
-
-def i2c_eeprom_dump(lines):
-	for line in range(0,lines):
-		addr = line*32
-		print hex(addr), hexlify(i2c_eeprom_read(addr, 32))
-	print
+e.dump(1)
+e.dump(2)
 
 data = array('B', range(0, 32))
-i2c_eeprom_write(0x3fe0, data)
+e.write(0x10, data)
+e.dump(2)
 
 #data = array('B', range(32, 64))
 #i2c_eeprom_write(32, data)
 #i2c_eeprom_dump()
 
-i2c_eeprom_dump(512)
+#i2c_eeprom_dump(512)
 
 '''
 usbmon trace test-utility
