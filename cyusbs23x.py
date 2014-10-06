@@ -15,7 +15,7 @@ class UsbBridge:
     __I2C_RESET_CMD          = 0xC9
     __I2C_RESET_CMD_LEN      = 0
 
-    def __init__(self):
+    def __init__(self, debug = None):
         self.dev = find(idVendor=0x04b4, idProduct=0x0004)
         if self.dev is None:
             raise ValueError('Device not found')
@@ -35,9 +35,10 @@ class UsbBridge:
         self.ep_bulk_o = find_descriptor(intf, \
                 custom_match = lambda e: endpoint_direction(e.bEndpointAddress) == ENDPOINT_OUT, \
                 bmAttributes=ENDPOINT_TYPE_BULK)
-        print self.ep_bulk_i
-        print self.ep_bulk_o
-        print self.ep_intr
+        if debug is not None:
+            print self.ep_bulk_i
+            print self.ep_bulk_o
+            print self.ep_intr
 
     def i2c_reset(self):	
         # reset read
@@ -80,8 +81,11 @@ class UsbBridge:
         '''
         if self.i2c_status_ok() is False:
             exit
-        # FIXME - hardcoded start=1, stop=0
-        self.dev.ctrl_transfer(self.__HOST_TO_DEVICE, self.__I2C_WRITE_CMD, ((dev_addr << 8) | 0x01), len(data), 0)
+        # send i2c write command, start=1, stop=0
+        self.dev.ctrl_transfer(self.__HOST_TO_DEVICE, \
+                               self.__I2C_WRITE_CMD, \
+                               ((dev_addr << 8) | 0x01), \
+                               len(data), 0)
         self.ep_bulk_o.write(data, len(data))
         self.i2c_wait_for_interrupt()
 
@@ -101,8 +105,11 @@ class UsbBridge:
         if self.i2c_status_ok() is False:
             exit
         data = array('B',[])
-        # FIXME - hardcoded start=1, stop=1
-        self.dev.ctrl_transfer(self.__HOST_TO_DEVICE, self.__I2C_READ_CMD, ((dev_addr << 8) | 0x03), length, 0)
+        # send i2c read command start=1, stop=1
+        self.dev.ctrl_transfer(self.__HOST_TO_DEVICE, \
+                               self.__I2C_READ_CMD, \
+                               ((dev_addr << 8) | 0x03), 
+                               length, 0)
         data = self.ep_bulk_i.read(length)
         self.i2c_wait_for_interrupt()
         return data
@@ -114,12 +121,25 @@ class I2cEeprom:
         self.eeprom_addr = addr
 
     def write(self, addr, data):
+        ''' 
+            Memory write - sends one write message with 
+                           2 byte address followed by data
+        '''
+        if ((addr + len(data) - 1) > 0xffff):
+            raise ValueError('Only 16-bit address supported')
         # add address (first 2 bytes)
         data.insert(0, (addr & 0xff))
         data.insert(0, ((addr & 0xff00) >> 8))
         self.ub.i2c_write(self.eeprom_addr, data)
 
     def read(self, addr, length):
+        ''' 
+            Memory read - sends one write message with 
+                           2 byte address followed by 
+                           read message to retrieve data
+        '''
+        if ((addr + length - 1) > 0xffff):
+            raise ValueError('Only 16-bit address supported')
         # start clean
         self.ub.i2c_reset()
         # write address page
@@ -131,6 +151,6 @@ class I2cEeprom:
     def dump(self, lines):
         for line in range(0,lines):
             addr = line*32
-            print hex(addr), hexlify(self.read(addr, 32))
+            print hex(addr).rjust(8) + ":", hexlify(self.read(addr, 32))
         print
 
