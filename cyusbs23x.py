@@ -46,9 +46,11 @@ class UsbBridge:
         # reset write
         sts = self.dev.ctrl_transfer(self.__DEVICE_TO_HOST, self.__I2C_RESET_CMD, 1, 0, self.__I2C_RESET_CMD_LEN)
 
-    def i2c_status_ok(self):
+    def i2c_status_ok(self, debug=None):
         __I2C_ERROR_BIT = 0x01
         sts = self.dev.ctrl_transfer(self.__DEVICE_TO_HOST, self.__I2C_GET_STATUS_CMD, 0, 0, self.__I2C_GET_STATUS_CMD_LEN)
+        if debug is not None:
+            print "Status:", hex(sts[0]), hex(sts[1]), hex(sts[2])
         if sts[0] & __I2C_ERROR_BIT:
             print "Device busy"
             return False;
@@ -56,7 +58,7 @@ class UsbBridge:
     def i2c_wait_for_interrupt(self):
         self.ep_intr.read(3)
 
-    def i2c_write(self, dev_addr, data):
+    def i2c_write(self, dev_addr, data, start=1, stop=0):
         '''
          usbmon trace:
              S Ci:6:002:0 s c0 c8 0001 0000 0003 3 <
@@ -81,15 +83,15 @@ class UsbBridge:
         '''
         if self.i2c_status_ok() is False:
             exit
-        # send i2c write command, start=1, stop=0
+        # send i2c write command
         self.dev.ctrl_transfer(self.__HOST_TO_DEVICE, \
                                self.__I2C_WRITE_CMD, \
-                               ((dev_addr << 8) | 0x01), \
+                               ((dev_addr << 8) | ((stop & 1) << 1) | (start & 1)), \
                                len(data), 0)
         self.ep_bulk_o.write(data, len(data))
         self.i2c_wait_for_interrupt()
 
-    def i2c_read(self, dev_addr, length):
+    def i2c_read(self, dev_addr, length, start=1, stop=1):
         '''
          usbmon trace:
              S Ci:6:002:0 s c0 c8 0000 0000 0003 3 <
@@ -105,20 +107,24 @@ class UsbBridge:
         if self.i2c_status_ok() is False:
             exit
         data = array('B',[])
-        # send i2c read command start=1, stop=1
+        # send i2c read command
         self.dev.ctrl_transfer(self.__HOST_TO_DEVICE, \
                                self.__I2C_READ_CMD, \
-                               ((dev_addr << 8) | 0x03), 
+                               ((dev_addr << 8) | ((stop & 1) << 1) | (start & 1)), \
                                length, 0)
         data = self.ep_bulk_i.read(length)
         self.i2c_wait_for_interrupt()
         return data
 
 
-class I2cEeprom:
+class I2cMemDev:
     def __init__(self, usb_bridge, addr):
         self.ub = usb_bridge
         self.eeprom_addr = addr
+        self.rd_start = 1
+        self.rd_stop  = 1
+        self.wr_start = 1
+        self.wr_stop  = 0
 
     def write(self, addr, data):
         ''' 
@@ -130,7 +136,7 @@ class I2cEeprom:
         # add address (first 2 bytes)
         data.insert(0, (addr & 0xff))
         data.insert(0, ((addr & 0xff00) >> 8))
-        self.ub.i2c_write(self.eeprom_addr, data)
+        self.ub.i2c_write(self.eeprom_addr, data, self.wr_start, self.wr_stop)
 
     def read(self, addr, length):
         ''' 
@@ -144,11 +150,12 @@ class I2cEeprom:
         self.ub.i2c_reset()
         # write address page
         data = array('B', [((addr & 0xff00) >> 8), (addr & 0xff)])
-        self.ub.i2c_write(self.eeprom_addr, data)
+        self.ub.i2c_write(self.eeprom_addr, data, self.wr_start, self.wr_stop)
         # read data
-        return self.ub.i2c_read(self.eeprom_addr, length)
+        return self.ub.i2c_read(self.eeprom_addr, length, self.rd_start, self.rd_stop)
 
     def dump(self, lines):
+        print ''.rjust(9), 2 * '0   2   4   6   8   a   c   e   '
         for line in range(0,lines):
             addr = line*32
             print hex(addr).rjust(8) + ":", hexlify(self.read(addr, 32))
