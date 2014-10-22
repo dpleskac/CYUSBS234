@@ -118,9 +118,10 @@ class UsbBridge:
 
 
 class I2cMemDev:
-    def __init__(self, usb_bridge, addr):
+    def __init__(self, usb_bridge, addr, num_addr_bytes = 2):
         self.ub = usb_bridge
         self.eeprom_addr = addr
+        self.addr_bytes = num_addr_bytes
         self.rd_start = 1
         self.rd_stop  = 1
         self.wr_start = 1
@@ -131,11 +132,11 @@ class I2cMemDev:
             Memory write - sends one write message with 
                            2 byte address followed by data
         '''
-        if ((addr + len(data) - 1) > 0xffff):
-            raise ValueError('Only 16-bit address supported')
-        # add address (first 2 bytes)
-        data.insert(0, (addr & 0xff))
-        data.insert(0, ((addr & 0xff00) >> 8))
+        if ((addr + len(data) - 1) >= pow(256, self.addr_bytes)):
+            raise ValueError('Address range exceeded')
+        # add address (first n bytes)
+        for shift in range(0, self.addr_bytes * 8, 8):
+            data.insert(0, ((addr >> shift) & 0xff))
         self.ub.i2c_write(self.eeprom_addr, data, self.wr_start, self.wr_stop)
 
     def read(self, addr, length):
@@ -144,12 +145,14 @@ class I2cMemDev:
                            2 byte address followed by 
                            read message to retrieve data
         '''
-        if ((addr + length - 1) > 0xffff):
-            raise ValueError('Only 16-bit address supported')
+        if ((addr + length - 1) >= pow(256, self.addr_bytes)):
+            raise ValueError('Address range exceeded')
         # start clean
         self.ub.i2c_reset()
         # write address page
-        data = array('B', [((addr & 0xff00) >> 8), (addr & 0xff)])
+        data = array('B', [])
+        for shift in range(0, self.addr_bytes * 8, 8):
+            data.insert(0, ((addr >> shift) & 0xff))
         self.ub.i2c_write(self.eeprom_addr, data, self.wr_start, self.wr_stop)
         # read data
         return self.ub.i2c_read(self.eeprom_addr, length, self.rd_start, self.rd_stop)
